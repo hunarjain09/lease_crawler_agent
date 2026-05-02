@@ -2,6 +2,10 @@ import { Spectrum } from "spectrum-ts";
 import { terminal } from "spectrum-ts/providers/terminal";
 import { imessage } from "spectrum-ts/providers/imessage";
 
+import { classify } from "./classifier.js";
+import { addLeaks, type Leak } from "./state.js";
+import { analyze, crawl } from "./tools.js";
+
 const projectId = process.env.SPECTRUM_PROJECT_ID;
 const projectSecret = process.env.SPECTRUM_PROJECT_SECRET;
 const useIMessage = Boolean(projectId && projectSecret);
@@ -22,18 +26,38 @@ console.log(
     : `[agent] Terminal provider ready. Type below.`,
 );
 
-for await (const [, message] of app.messages) {
-  switch (message.content.type) {
-    case "text":
-      await message.reply(`echo: ${message.content.text}`);
-      break;
-    case "attachment":
+const stateByUser = new Map<string, { leaks: Leak[] }>();
+
+for await (const [space, message] of app.messages) {
+  if (message.content.type !== "text") continue;
+  const userId = message.sender.id;
+  const state = stateByUser.get(userId) ?? { leaks: [] };
+  const intent = classify(message.content.text);
+
+  await space.responding(async () => {
+    try {
+      if (intent.kind === "url") {
+        const { content } = await crawl(intent.url);
+        const { leaks, summary } = await analyze(content, state.leaks);
+        state.leaks = addLeaks(state.leaks, leaks);
+        const totals = `\n\n(${leaks.length} new, ${state.leaks.length} total)`;
+        await message.reply(summary + totals);
+      } else if (intent.kind === "walkthrough") {
+        await message.reply(
+          state.leaks.length === 0
+            ? "No listings discussed yet. Send me a URL first."
+            : `Walkthrough video isn't wired yet — that's the F1 follow-up. ${state.leaks.length} leaks tracked across this conversation.`,
+        );
+      } else {
+        await message.reply("Send me a listing URL or ask for a walkthrough.");
+      }
+    } catch (err) {
+      console.error("[agent] error:", err);
       await message.reply(
-        `got attachment: ${message.content.name} (${message.content.mimeType})`,
+        `Sorry, something broke. ${err instanceof Error ? err.message : String(err)}`,
       );
-      break;
-    default:
-      // "custom" or unknown — skip silently
-      break;
-  }
+    }
+  });
+
+  stateByUser.set(userId, state);
 }
