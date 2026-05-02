@@ -24,8 +24,8 @@ User: a single person evaluating leases. No multi-tenant, no auth, no billing.
 | Agent | **Bun** + `spectrum-ts` (TypeScript). Terminal provider for dev, iMessage in prod. |
 | Local server | **Python 3.12** + **FastAPI** + **Uvicorn**, deps via **uv** (`pyproject.toml`, `uv.lock`). |
 | Crawler | **Obscura** (`https://github.com/h4ckf0r0day/obscura`) — Rust, CDP, no Chrome dep. |
-| Inference | **GMI Cloud** at `https://api.gmi-serving.com`, Anthropic-compatible. Models: `anthropic/claude-sonnet-4.6` (default), `anthropic/claude-opus-4.6` (hard cases), `anthropic/claude-haiku-4.6` (cheap). |
-| Video gen | **Pexiverse** on GMI — endpoint shape **TBD**. |
+| Reasoning LLM | **GMI Serverless** — OpenAI-compatible. Base `https://api.gmi-serving.com/v1`, bearer auth. Default model `deepseek-ai/DeepSeek-R1` (verify Claude availability before switching to `anthropic/claude-sonnet-4.6`). |
+| Video gen | **GMI Inference Engine — Video API** (request-queue, async). Base `https://console.gmicloud.ai/api/v1/ie/requestqueue/apikey`. Default model **Veo3** (alternatives: `Veo3-Fast`, `Kling-Text2Video-V2.1-Master`, `Luma-Ray2`). "Pexiverse" was not found in GMI public docs — treat as alias / confirm with user. |
 | Tests | `pytest` (server, run via `uv run pytest`) + `bun:test` (agent). |
 
 ---
@@ -73,15 +73,15 @@ lease_crawler_agent/
 Copy `.env.example` → `.env`. The server reads env via `pydantic-settings`.
 
 ```
-# GMI Cloud (Anthropic-compatible)
-ANTHROPIC_BASE_URL=https://api.gmi-serving.com
-ANTHROPIC_AUTH_TOKEN=<your GMI key from console.gmicloud.ai>
-ANTHROPIC_MODEL=anthropic/claude-sonnet-4.6
-API_TIMEOUT_MS=600000
+# GMI Serverless (OpenAI-compatible LLM)
+GMI_API_KEY=<your GMI key from console.gmicloud.ai>
+GMI_LLM_BASE_URL=https://api.gmi-serving.com/v1
+GMI_LLM_MODEL=deepseek-ai/DeepSeek-R1     # swap to anthropic/claude-sonnet-4.6 if available on serverless
 
-# Pexiverse (TBD — fill in once endpoint is known)
-PEXIVERSE_BASE_URL=
-PEXIVERSE_API_KEY=
+# GMI Video API (Veo3 / Kling / Luma — async request queue)
+GMI_VIDEO_BASE_URL=https://console.gmicloud.ai/api/v1/ie/requestqueue/apikey
+GMI_VIDEO_MODEL=Veo3
+# GMI_ORG_ID=                              # optional, sent as X-Organization-ID
 
 # Obscura
 OBSCURA_BIN=/usr/local/bin/obscura      # or absolute path to built binary
@@ -108,8 +108,13 @@ Server:
 ```bash
 cd server
 uv init --package lease_crawler
-uv add fastapi uvicorn[standard] httpx pydantic pydantic-settings anthropic
+uv add fastapi uvicorn[standard] httpx pydantic pydantic-settings openai tenacity
 uv add --group dev pytest pytest-asyncio respx pytest-recording
+```
+We use the `openai` SDK (not `anthropic`) because GMI's serverless `/chat/completions` is OpenAI-compatible. Point it at GMI:
+```python
+from openai import OpenAI
+client = OpenAI(base_url=settings.GMI_LLM_BASE_URL, api_key=settings.GMI_API_KEY)
 ```
 Implement `GET /health` → `{"ok": true}`.
 
@@ -150,11 +155,12 @@ Implement `crawler.py`:
 ### M2 — GMI reasoning path
 **Goal:** `POST /analyze { content, context }` returns `{ leaks[], summary }`.
 
-Implement `inference.py`:
-- Use the official `anthropic` Python SDK. Construct the client with `base_url=settings.ANTHROPIC_BASE_URL` and `auth_token=settings.ANTHROPIC_AUTH_TOKEN`.
-- Use **prompt caching** on the system prompt and the leak schema (long-lived, reused across calls).
-- System prompt teaches the model what a "leak" is: anything in the listing that affects total cost of occupancy, lease flexibility, or quality of life. Output strict JSON matching the `Leak` schema.
-- Use tool/function-calling style (response_format JSON) with retries on parse failure.
+Implement `inference.py` against **GMI's OpenAI-compatible serverless** endpoint:
+- Client: `OpenAI(base_url=settings.GMI_LLM_BASE_URL, api_key=settings.GMI_API_KEY)`.
+- Call `client.chat.completions.create(model=settings.GMI_LLM_MODEL, messages=[...], response_format={"type": "json_object"}, max_tokens=4096, temperature=0.2)`.
+- System prompt teaches the model what a "leak" is: anything in the listing affecting total cost of occupancy, lease flexibility, or quality of life. Output strict JSON matching the `Leak` schema.
+- Wrap the call with `tenacity` retries on 5xx and on JSON parse failure (one re-prompt with the parser error appended).
+- **Model selection:** start with `deepseek-ai/DeepSeek-R1`. Before locking it in, hit `GET https://api.gmi-serving.com/v1/models` with the API key and check whether `anthropic/claude-sonnet-4.6` (or 4.7) is in the catalog; if yes, switch via env. The Anthropic-compatible path used by Claude Code (`api.gmi-serving.com` + `anthropic` SDK) is **not** the same as serverless and may not be exposed for arbitrary apps.
 
 `Leak` schema (`models.py`):
 ```python
@@ -209,10 +215,25 @@ Agent code:
 
 No code changes inside the message loop. Document the iMessage provider setup steps once Photon docs clarify the bridge requirements (Mac relay vs. hosted). Keep integration tests on Terminal.
 
-### M5 — Pexiverse `/walkthrough`
-**Goal:** real video URL returned to the agent.
+### M5 — Walkthrough video via GMI Video API
+**Goal:** `POST /walkthrough { leaks[] }` returns a real `video_url`.
 
-**Blocked** until the Pexiverse endpoint shape is documented. Implement against the spec when it lands. Treat it as a possibly-async job: poll or webhook. Add a cassette for integration.
+GMI Video API is **async with polling**:
+1. Build a prompt from the leak list (one paragraph per leak, max ~8 seconds of video unless multi-shot is supported).
+2. `POST {GMI_VIDEO_BASE_URL}/requests` with body:
+   ```json
+   {"model": "Veo3", "payload": {"prompt": "<built prompt>", "durationSeconds": "8", "aspectRatio": "16:9"}}
+   ```
+   Headers: `Authorization: Bearer $GMI_API_KEY`, optional `X-Organization-ID`.
+3. Receive `{request_id, status: "dispatched"}`.
+4. Poll `GET {GMI_VIDEO_BASE_URL}/requests/{request_id}` every ~5s with exponential backoff up to a 5-minute deadline.
+5. On `status == "success"`, return `outcome.video_url` (and `thumbnail_image_url`) to the caller.
+
+If "Pexiverse" is in fact a custom model on the user's GMI org, set `GMI_VIDEO_MODEL=Pexiverse` (or whatever the real ID is) — the rest of the code stays the same.
+
+**Tests:**
+- Unit: prompt builder from leaks; status-machine reducer (dispatched → processing → success/failed).
+- Integration: VCR cassette of a full submit + 3 polls + success response; assert `video_url` flows through.
 
 ### M6 — Second GMI model
 Add once role is defined.
@@ -280,18 +301,26 @@ Required `/analyze` assertions on this fixture:
 
 ---
 
-## 8. Open TBDs (don't block on these)
+## 8. Notes on Photon ↔ local server
 
-1. **Pexiverse**: endpoint, request schema, sync vs. async, output format (mp4 URL? signed URL? raw bytes?). Implement M5 only after this is documented.
-2. **Second GMI model**: name + role.
-3. **iMessage provider deployment**: Mac relay vs. hosted bridge.
-4. **Local exposure**: if Photon prod runs in cloud, decide tunnel (ngrok / Cloudflare Tunnel / Tailscale Funnel).
-5. **"Claude 4.7" vs 4.6**: original spec said 4.7, GMI exposes 4.6. Default to 4.6 (`anthropic/claude-sonnet-4.6`); upgrade if/when 4.7 ships on GMI.
-6. **Anti-bot**: if Avalon (or others) block Obscura, add `--stealth` and consider a residential proxy.
+The Spectrum agent runs on the user's machine inside a Bun process. Tool calls are plain `fetch()` from agent code, so:
+
+- **Local dev (Terminal provider):** agent → `http://127.0.0.1:8000` directly. No tunnel.
+- **Production (iMessage provider on the same Mac):** still localhost — both processes on the same box.
+- **Production (iMessage provider hosted by Photon):** Photon pushes inbound messages into your Bun process, your Bun process still calls localhost. No inbound tunnel for the Python server.
+- **Only if the Bun agent itself is moved to the cloud** does the Python server need to be exposed (ngrok / Cloudflare Tunnel / Tailscale Funnel). Avoid that case.
+
+## 9. Open TBDs (don't block on these)
+
+1. **Claude on GMI serverless** — confirm whether `anthropic/claude-sonnet-4.6` (or 4.7) is callable via `/v1/chat/completions` or only via the Claude-Code Anthropic-compat adapter. Check `GET /v1/models`.
+2. **"Pexiverse"** — not in GMI public docs. Confirm whether it's an alias for Veo3 / Kling / a private deployment on the user's GMI org. Until then default to `Veo3`.
+3. **Second GMI model** — name + role still undefined.
+4. **iMessage provider deployment** — Mac relay (BlueBubbles-style) vs. hosted by Photon.
+5. **Anti-bot** — if Avalon (or others) block Obscura, add `--stealth` and consider a residential proxy.
 
 ---
 
-## 9. Definition of done (whole project)
+## 10. Definition of done (whole project)
 
 - `uv run pytest` in `server/` is green; coverage ≥ 80% on `crawler.py`, `inference.py`, route handlers.
 - `bun test` in `agent/` is green.
