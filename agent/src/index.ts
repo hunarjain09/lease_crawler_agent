@@ -3,8 +3,8 @@ import { terminal } from "spectrum-ts/providers/terminal";
 import { imessage } from "spectrum-ts/providers/imessage";
 
 import { classify } from "./classifier.js";
-import { addLeaks, type Leak } from "./state.js";
-import { analyze, crawl } from "./tools.js";
+import { addLeaks, appendTurn, emptyState, type SessionState } from "./state.js";
+import { analyze, ask, crawl } from "./tools.js";
 
 const projectId = process.env.SPECTRUM_PROJECT_ID;
 const projectSecret = process.env.SPECTRUM_PROJECT_SECRET;
@@ -26,31 +26,51 @@ console.log(
     : `[agent] Terminal provider ready. Type below.`,
 );
 
-const stateByUser = new Map<string, { leaks: Leak[] }>();
+const stateByUser = new Map<string, SessionState>();
+function getState(userId: string): SessionState {
+  let s = stateByUser.get(userId);
+  if (!s) {
+    s = emptyState();
+    stateByUser.set(userId, s);
+  }
+  return s;
+}
 
 for await (const [space, message] of app.messages) {
   if (message.content.type !== "text") continue;
   const userId = message.sender.id;
-  const state = stateByUser.get(userId) ?? { leaks: [] };
-  const intent = classify(message.content.text);
+  const state = getState(userId);
+  const text = message.content.text;
+  const intent = classify(text);
 
   await space.responding(async () => {
     try {
+      let reply: string;
+
       if (intent.kind === "url") {
         const { content } = await crawl(intent.url);
-        const { leaks, summary } = await analyze(content, state.leaks);
-        state.leaks = addLeaks(state.leaks, leaks);
-        const totals = `\n\n(${leaks.length} new, ${state.leaks.length} total)`;
-        await message.reply(summary + totals);
+        const result = await analyze(content, state.leaks);
+        state.leaks = addLeaks(state.leaks, result.leaks);
+        state.summary = result.summary;
+        state.lastUrl = intent.url;
+        reply = `${result.summary}\n\n(${result.leaks.length} new, ${state.leaks.length} total)`;
       } else if (intent.kind === "walkthrough") {
-        await message.reply(
+        reply =
           state.leaks.length === 0
             ? "No listings discussed yet. Send me a URL first."
-            : `Walkthrough video isn't wired yet — that's the F1 follow-up. ${state.leaks.length} leaks tracked across this conversation.`,
-        );
+            : `Walkthrough video isn't wired yet (F1). I'm tracking ${state.leaks.length} leaks across this conversation.`;
       } else {
-        await message.reply("Send me a listing URL or ask for a walkthrough.");
+        if (state.leaks.length === 0 && !state.summary) {
+          reply = "Send me a listing URL to get started, then ask me anything about it.";
+        } else {
+          const { answer } = await ask(text, state.leaks, state.summary, state.history);
+          state.history = appendTurn(state.history, { role: "user", content: text });
+          state.history = appendTurn(state.history, { role: "assistant", content: answer });
+          reply = answer;
+        }
       }
+
+      await message.reply(reply);
     } catch (err) {
       console.error("[agent] error:", err);
       await message.reply(
@@ -58,6 +78,4 @@ for await (const [space, message] of app.messages) {
       );
     }
   });
-
-  stateByUser.set(userId, state);
 }

@@ -28,4 +28,16 @@ export async function analyze(content: string, context: Leak[]): Promise<Analyze
   return postJson<AnalyzeResponse>("/analyze", { content, context });
 }
 
+export type ChatTurn = { role: "user" | "assistant"; content: string };
+export type AskResponse = { answer: string };
+
+export async function ask(
+  question: string,
+  leaks: Leak[],
+  summary: string,
+  history: ChatTurn[],
+): Promise<AskResponse> {
+  return postJson<AskResponse>("/ask", { question, leaks, summary, history });
+}
+
 export const _internals = { BASE };

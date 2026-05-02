@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { addLeaks, type Leak } from "../../src/state.js";
+import {
+  addLeaks,
+  appendTurn,
+  emptyState,
+  HISTORY_LIMIT,
+  type ChatTurn,
+  type Leak,
+} from "../../src/state.js";
 
 const leak = (id: string, title = id): Leak => ({
   id,
@@ -29,5 +36,31 @@ describe("addLeaks", () => {
       [leak("c"), leak("a"), leak("d")],
     );
     expect(result.map((l) => l.id)).toEqual(["a", "b", "c", "d"]);
+  });
+});
+
+describe("emptyState", () => {
+  it("returns a fresh blank session", () => {
+    const s = emptyState();
+    expect(s).toEqual({ leaks: [], summary: "", lastUrl: null, history: [] });
+  });
+});
+
+describe("appendTurn", () => {
+  const turn = (role: "user" | "assistant", content: string): ChatTurn => ({ role, content });
+
+  it("appends in order", () => {
+    const result = appendTurn([turn("user", "a")], turn("assistant", "b"));
+    expect(result.map((t) => t.content)).toEqual(["a", "b"]);
+  });
+
+  it("trims to the most recent HISTORY_LIMIT entries", () => {
+    let history: ChatTurn[] = [];
+    for (let i = 0; i < HISTORY_LIMIT + 5; i++) {
+      history = appendTurn(history, turn("user", `m${i}`));
+    }
+    expect(history).toHaveLength(HISTORY_LIMIT);
+    expect(history[0]?.content).toBe(`m${5}`);
+    expect(history[history.length - 1]?.content).toBe(`m${HISTORY_LIMIT + 4}`);
   });
 });

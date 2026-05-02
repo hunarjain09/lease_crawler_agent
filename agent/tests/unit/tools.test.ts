@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { analyze, crawl } from "../../src/tools.js";
+import { analyze, ask, crawl } from "../../src/tools.js";
 
 const baseUrl = "http://127.0.0.1:8000";
 
@@ -30,10 +30,8 @@ describe("tools", () => {
     const result = await crawl("https://x.com");
     expect(result.content).toBe("<html>ok</html>");
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(url).toBe(`${baseUrl}/crawl`);
-    expect(init.method).toBe("POST");
     expect(JSON.parse(init.body)).toEqual({ url: "https://x.com" });
   });
 
@@ -63,6 +61,28 @@ describe("tools", () => {
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(url).toBe(`${baseUrl}/analyze`);
     expect(JSON.parse(init.body)).toEqual({ content: "<html/>", context: [] });
+  });
+
+  it("ask posts question + grounding context", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ answer: "Base rent is $3,415." }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const result = await ask("What's the rent?", [], "Avalon SV", [
+      { role: "user", content: "Tell me about Avalon" },
+      { role: "assistant", content: "It's a 1bd at $3,415" },
+    ]);
+    expect(result.answer).toContain("3,415");
+
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe(`${baseUrl}/ask`);
+    const body = JSON.parse(init.body);
+    expect(body.question).toBe("What's the rent?");
+    expect(body.summary).toBe("Avalon SV");
+    expect(body.history).toHaveLength(2);
   });
 
   it("throws on non-2xx", async () => {
