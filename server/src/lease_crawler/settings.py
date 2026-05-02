@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     SERVER_HOST: str = "127.0.0.1"
     SERVER_PORT: int = 8000
 
+    # Obscura crawler
+    OBSCURA_BIN: str = "/usr/local/bin/obscura"
+    OBSCURA_TIMEOUT_S: float = 30.0
+
     model_config = SettingsConfigDict(
         env_file=_REPO_ROOT / ".env",
         env_file_encoding="utf-8",
