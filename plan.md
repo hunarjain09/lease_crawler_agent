@@ -21,12 +21,12 @@ User: a single person evaluating leases. No multi-tenant, no auth, no billing.
 
 | Layer | Tech |
 |---|---|
-| Agent | **Bun** + `spectrum-ts` (TypeScript). Terminal provider for dev, iMessage in prod. |
+| Agent | **Node 20+** + `spectrum-ts` (TypeScript), deps via **pnpm**. Terminal provider for dev, iMessage in prod. |
 | Local server | **Python 3.12** + **FastAPI** + **Uvicorn**, deps via **uv** (`pyproject.toml`, `uv.lock`). |
 | Crawler | **Obscura** (`https://github.com/h4ckf0r0day/obscura`) — Rust, CDP, no Chrome dep. |
 | Reasoning LLM | **GMI Serverless** — OpenAI-compatible. Base `https://api.gmi-serving.com/v1`, bearer auth. Default model `deepseek-ai/DeepSeek-R1` (verify Claude availability before switching to `anthropic/claude-sonnet-4.6`). |
 | Video gen | **Pixverse via GMI Video API** (request-queue, async). Base `https://console.gmicloud.ai/api/v1/ie/requestqueue/apikey`. Model `Pixverse` (verify exact ID at runtime — GMI docs list other models like Veo3/Kling/Luma but acknowledge "...other models..."). Used to render a video summary of the apartments discussed in the session. |
-| Tests | `pytest` (server, run via `uv run pytest`) + `bun:test` (agent). |
+| Tests | `pytest` (server, run via `uv run pytest`) + `vitest` (agent). |
 
 ---
 
@@ -48,7 +48,7 @@ lease_crawler_agent/
 │       ├── conftest.py
 │       ├── unit/
 │       └── integration/
-├── agent/                        # Bun / spectrum-ts agent
+├── agent/                        # Node + pnpm / spectrum-ts agent
 │   ├── package.json
 │   ├── tsconfig.json
 │   ├── src/
@@ -83,7 +83,8 @@ GMI_VIDEO_BASE_URL=https://console.gmicloud.ai/api/v1/ie/requestqueue/apikey
 GMI_VIDEO_MODEL=Pixverse
 # GMI_ORG_ID=                              # optional, sent as X-Organization-ID
 
-# Spectrum (Photon) — only needed for non-Terminal providers
+# Spectrum (Photon) — only needed for non-Terminal providers (iMessage, etc.)
+# Get these from the Photon Project Page (project id + API key/secret)
 SPECTRUM_PROJECT_ID=
 SPECTRUM_PROJECT_SECRET=
 
@@ -122,13 +123,14 @@ client = OpenAI(base_url=settings.GMI_LLM_BASE_URL, api_key=settings.GMI_API_KEY
 ```
 Implement `GET /health` → `{"ok": true}`.
 
-Agent:
+Agent (Node 20+, pnpm):
 ```bash
 cd agent
-bun init -y
-bun add spectrum-ts@latest
+pnpm init
+pnpm add spectrum-ts
+pnpm add -D typescript tsx vitest @types/node
 ```
-Minimal Spectrum app using the Terminal provider that echoes input. Real API surface (per [docs.photon.codes/spectrum-ts/getting-started](https://docs.photon.codes/spectrum-ts/getting-started)):
+Minimal Spectrum app using the Terminal provider (no project credentials needed):
 
 ```ts
 import { Spectrum, terminal } from "spectrum-ts";
@@ -138,15 +140,24 @@ const app = await Spectrum({
 });
 
 for await (const [space, message] of app.messages) {
-  if (message.content.type !== "text") continue;
-  await message.reply(`echo: ${message.content.text}`);
+  if (message.sender.id === message.platform) continue; // skip self if applicable
+  switch (message.content.type) {
+    case "text":
+      await message.reply(`echo: ${message.content.text}`);
+      break;
+    case "attachment":
+      await message.reply(`got ${message.content.name} (${message.content.mimeType})`);
+      break;
+    default:
+      // "custom" — platform-specific raw payload, ignore for now
+  }
 }
 ```
 
-For iMessage (M4), swap `terminal.config()` → `imessage.config()` and pass `projectId` / `projectSecret` from env.
+For iMessage (M4), swap `terminal.config()` → `imessage.config()` and pass `projectId` / `projectSecret` from env (Photon Project Page → API key & project id).
 
 CI:
-- GitHub Actions workflow: matrix runs `uv run pytest` in `server/` and `bun test` in `agent/`.
+- GitHub Actions workflow: matrix runs `uv run pytest` in `server/` and `pnpm vitest run` in `agent/`.
 
 **Tests:**
 - Unit: `test_health.py` hits `/health` via `httpx.AsyncClient(app=app)`.
@@ -228,6 +239,8 @@ Agent code:
         await message.reply(summary);
       } else if (intent.kind === "walkthrough") {
         const { videoUrl } = await walkthrough(state.leaks);
+        // iMessage will preview the URL inline; for an actual file send,
+        // fetch the bytes and use `attachment(buffer, { mimeType: "video/mp4" })`.
         await message.reply(videoUrl);
       } else {
         await message.reply("Send me a listing URL or ask for a walkthrough.");
@@ -237,11 +250,12 @@ Agent code:
     stateByUser.set(userId, state);
   }
   ```
+- Available content builders (per [Content docs](https://docs.photon.codes/spectrum-ts/content)): `text(...)`, `attachment(path | buffer, { mimeType })`, `custom({...})`. `message.reply(...)` and `space.send(...)` accept variadic `ContentInput[]`.
 - Note: state is **in-memory per `sender.id`**. Restarting the agent loses it. M7 adds sqlite persistence.
 
 **Tests:**
 - Unit: classifier truth table; reducer dedupes.
-- Integration (`agent/tests/integration/terminal-roundtrip.test.ts`): spawn Spectrum with the Terminal provider, point `SERVER_BASE_URL` at a Bun-hosted stub returning canned `/crawl` and `/analyze` responses; script an input line; assert the printed reply.
+- Integration (`agent/tests/integration/terminal-roundtrip.test.ts`): spawn Spectrum with the Terminal provider, point `SERVER_BASE_URL` at a Node-hosted stub (e.g. `node:http`) returning canned `/crawl` and `/analyze` responses; script an input line; assert the printed reply.
 
 ### M4 — iMessage provider
 **Goal:** swap Terminal → iMessage provider via Spectrum config; manual E2E from a real Apple device.
@@ -338,12 +352,12 @@ Required `/analyze` assertions on this fixture:
 
 ## 8. Notes on Photon ↔ local server
 
-The Spectrum agent runs on the user's machine inside a Bun process. Tool calls are plain `fetch()` from agent code, so:
+The Spectrum agent runs on the user's machine inside a Node process. Tool calls are plain `fetch()` from agent code, so:
 
 - **Local dev (Terminal provider):** agent → `http://127.0.0.1:8000` directly. No tunnel.
 - **Production (iMessage provider on the same Mac):** still localhost — both processes on the same box.
-- **Production (iMessage provider hosted by Photon):** Photon pushes inbound messages into your Bun process, your Bun process still calls localhost. No inbound tunnel for the Python server.
-- **Only if the Bun agent itself is moved to the cloud** does the Python server need to be exposed (ngrok / Cloudflare Tunnel / Tailscale Funnel). Avoid that case.
+- **Production (iMessage provider hosted by Photon):** Photon pushes inbound messages into your Node process, your Node process still calls localhost. No inbound tunnel for the Python server.
+- **Only if the Node agent itself is moved to the cloud** does the Python server need to be exposed (ngrok / Cloudflare Tunnel / Tailscale Funnel). Avoid that case.
 
 ## 9. Open TBDs (don't block on these)
 
@@ -358,6 +372,6 @@ The Spectrum agent runs on the user's machine inside a Bun process. Tool calls a
 ## 10. Definition of done (whole project)
 
 - `uv run pytest` in `server/` is green; coverage ≥ 80% on `crawler.py`, `inference.py`, route handlers.
-- `bun test` in `agent/` is green.
+- `pnpm vitest run` in `agent/` is green.
 - `RUN_E2E=1 ./scripts/e2e.sh` against the Avalon URL produces a leak summary mentioning rent, lease term, and furnished premium, and (post-M5) a playable video URL.
 - README documents one-command setup: `make dev` boots Obscura sidecar, the FastAPI server, and the Spectrum Terminal agent.
