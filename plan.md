@@ -25,7 +25,7 @@ User: a single person evaluating leases. No multi-tenant, no auth, no billing.
 | Local server | **Python 3.12** + **FastAPI** + **Uvicorn**, deps via **uv** (`pyproject.toml`, `uv.lock`). |
 | Crawler | **Obscura** (`https://github.com/h4ckf0r0day/obscura`) — Rust, CDP, no Chrome dep. |
 | Reasoning LLM | **GMI Serverless** — OpenAI-compatible. Base `https://api.gmi-serving.com/v1`, bearer auth. Default model `deepseek-ai/DeepSeek-R1` (verify Claude availability before switching to `anthropic/claude-sonnet-4.6`). |
-| Video gen | **GMI Inference Engine — Video API** (request-queue, async). Base `https://console.gmicloud.ai/api/v1/ie/requestqueue/apikey`. Default model **Veo3** (alternatives: `Veo3-Fast`, `Kling-Text2Video-V2.1-Master`, `Luma-Ray2`). "Pexiverse" was not found in GMI public docs — treat as alias / confirm with user. |
+| Video gen | **Pixverse via GMI Video API** (request-queue, async). Base `https://console.gmicloud.ai/api/v1/ie/requestqueue/apikey`. Model `Pixverse` (verify exact ID at runtime — GMI docs list other models like Veo3/Kling/Luma but acknowledge "...other models..."). Used to render a video summary of the apartments discussed in the session. |
 | Tests | `pytest` (server, run via `uv run pytest`) + `bun:test` (agent). |
 
 ---
@@ -78,10 +78,14 @@ GMI_API_KEY=<your GMI key from console.gmicloud.ai>
 GMI_LLM_BASE_URL=https://api.gmi-serving.com/v1
 GMI_LLM_MODEL=deepseek-ai/DeepSeek-R1     # swap to anthropic/claude-sonnet-4.6 if available on serverless
 
-# GMI Video API (Veo3 / Kling / Luma — async request queue)
+# GMI Video API (Pixverse — async request queue)
 GMI_VIDEO_BASE_URL=https://console.gmicloud.ai/api/v1/ie/requestqueue/apikey
-GMI_VIDEO_MODEL=Veo3
+GMI_VIDEO_MODEL=Pixverse
 # GMI_ORG_ID=                              # optional, sent as X-Organization-ID
+
+# Spectrum (Photon) — only needed for non-Terminal providers
+SPECTRUM_PROJECT_ID=
+SPECTRUM_PROJECT_SECRET=
 
 # Obscura
 OBSCURA_BIN=/usr/local/bin/obscura      # or absolute path to built binary
@@ -124,7 +128,22 @@ cd agent
 bun init -y
 bun add spectrum-ts@latest
 ```
-Minimal Spectrum app using the Terminal provider that echoes input.
+Minimal Spectrum app using the Terminal provider that echoes input. Real API surface (per [docs.photon.codes/spectrum-ts/getting-started](https://docs.photon.codes/spectrum-ts/getting-started)):
+
+```ts
+import { Spectrum, terminal } from "spectrum-ts";
+
+const app = await Spectrum({
+  providers: [terminal.config()],
+});
+
+for await (const [space, message] of app.messages) {
+  if (message.content.type !== "text") continue;
+  await message.reply(`echo: ${message.content.text}`);
+}
+```
+
+For iMessage (M4), swap `terminal.config()` → `imessage.config()` and pass `projectId` / `projectSecret` from env.
 
 CI:
 - GitHub Actions workflow: matrix runs `uv run pytest` in `server/` and `bun test` in `agent/`.
@@ -188,23 +207,37 @@ Agent code:
 - `tools.ts`: typed wrappers `crawl(url)`, `analyze(content, context)`, `walkthrough(leaks)` hitting `SERVER_BASE_URL`.
 - `classifier.ts`: pure function `classify(text) → { kind: "url"|"walkthrough"|"chat", url?: string }`. URL detection via regex; walkthrough via keyword set (`walkthrough|video|recap`).
 - `state.ts`: `addLeaks(state, newLeaks)` deduplicates by `id`.
-- `index.ts`: Spectrum loop:
+- `index.ts`: Spectrum loop using the real API surface:
   ```ts
+  import { Spectrum, terminal } from "spectrum-ts";
+
+  const app = await Spectrum({ providers: [terminal.config()] });
+  const stateByUser = new Map<string, { leaks: Leak[] }>();
+
   for await (const [space, message] of app.messages) {
-    const intent = classify(message.text);
-    if (intent.kind === "url") {
-      const { content } = await crawl(intent.url);
-      const { leaks, summary } = await analyze(content, state.leaks);
-      state.leaks = addLeaks(state.leaks, leaks);
-      await message.reply(summary);
-    } else if (intent.kind === "walkthrough") {
-      const { videoUrl } = await walkthrough(state.leaks);
-      await message.reply(videoUrl);
-    } else {
-      await message.reply("Send me a listing URL or ask for a walkthrough.");
-    }
+    if (message.content.type !== "text") continue;
+    const userId = message.sender.id;
+    const state = stateByUser.get(userId) ?? { leaks: [] };
+    const intent = classify(message.content.text);
+
+    await space.responding(async () => {
+      if (intent.kind === "url") {
+        const { content } = await crawl(intent.url);
+        const { leaks, summary } = await analyze(content, state.leaks);
+        state.leaks = addLeaks(state.leaks, leaks);
+        await message.reply(summary);
+      } else if (intent.kind === "walkthrough") {
+        const { videoUrl } = await walkthrough(state.leaks);
+        await message.reply(videoUrl);
+      } else {
+        await message.reply("Send me a listing URL or ask for a walkthrough.");
+      }
+    });
+
+    stateByUser.set(userId, state);
   }
   ```
+- Note: state is **in-memory per `sender.id`**. Restarting the agent loses it. M7 adds sqlite persistence.
 
 **Tests:**
 - Unit: classifier truth table; reducer dedupes.
@@ -215,21 +248,23 @@ Agent code:
 
 No code changes inside the message loop. Document the iMessage provider setup steps once Photon docs clarify the bridge requirements (Mac relay vs. hosted). Keep integration tests on Terminal.
 
-### M5 — Walkthrough video via GMI Video API
-**Goal:** `POST /walkthrough { leaks[] }` returns a real `video_url`.
+### M5 — Pixverse walkthrough video via GMI Video API
+**Goal:** `POST /walkthrough { leaks[] }` returns a real `video_url` summarizing the apartments discussed in the session.
+
+The video is the artifact you'd share with a partner/roommate — narrated/visual recap of the listings reviewed so far. Pixverse is the chosen model (supports multi-shot generation with character consistency, which suits a per-listing walkthrough).
 
 GMI Video API is **async with polling**:
-1. Build a prompt from the leak list (one paragraph per leak, max ~8 seconds of video unless multi-shot is supported).
+1. Build a prompt from the accumulated leaks: one shot per apartment, naming the property, rent, lease term, and 1–2 standout leaks. Use Pixverse's multi-shot prompt format.
 2. `POST {GMI_VIDEO_BASE_URL}/requests` with body:
    ```json
-   {"model": "Veo3", "payload": {"prompt": "<built prompt>", "durationSeconds": "8", "aspectRatio": "16:9"}}
+   {"model": "Pixverse", "payload": {"prompt": "<built prompt>", "durationSeconds": "8", "aspectRatio": "16:9"}}
    ```
    Headers: `Authorization: Bearer $GMI_API_KEY`, optional `X-Organization-ID`.
 3. Receive `{request_id, status: "dispatched"}`.
-4. Poll `GET {GMI_VIDEO_BASE_URL}/requests/{request_id}` every ~5s with exponential backoff up to a 5-minute deadline.
-5. On `status == "success"`, return `outcome.video_url` (and `thumbnail_image_url`) to the caller.
+4. Poll `GET {GMI_VIDEO_BASE_URL}/requests/{request_id}` every ~5s with exponential backoff, up to a 5-minute deadline.
+5. On `status == "success"`, return `outcome.video_url` (and `thumbnail_image_url`).
 
-If "Pexiverse" is in fact a custom model on the user's GMI org, set `GMI_VIDEO_MODEL=Pexiverse` (or whatever the real ID is) — the rest of the code stays the same.
+**Verification step before coding:** hit `GET {GMI_VIDEO_BASE_URL}/models` (or the equivalent listing endpoint) with the API key and confirm the exact Pixverse model ID — GMI public docs don't enumerate it explicitly, but mention "...other models...". If the ID differs (e.g. `Pixverse-V6`), update env.
 
 **Tests:**
 - Unit: prompt builder from leaks; status-machine reducer (dispatched → processing → success/failed).
@@ -313,7 +348,7 @@ The Spectrum agent runs on the user's machine inside a Bun process. Tool calls a
 ## 9. Open TBDs (don't block on these)
 
 1. **Claude on GMI serverless** — confirm whether `anthropic/claude-sonnet-4.6` (or 4.7) is callable via `/v1/chat/completions` or only via the Claude-Code Anthropic-compat adapter. Check `GET /v1/models`.
-2. **"Pexiverse"** — not in GMI public docs. Confirm whether it's an alias for Veo3 / Kling / a private deployment on the user's GMI org. Until then default to `Veo3`.
+2. **Pixverse exact model ID on GMI** — confirm via `GET {GMI_VIDEO_BASE_URL}/models` whether the string is `Pixverse`, `Pixverse-V6`, or similar. Public docs only enumerate Veo3/Kling/Luma but acknowledge other models exist.
 3. **Second GMI model** — name + role still undefined.
 4. **iMessage provider deployment** — Mac relay (BlueBubbles-style) vs. hosted by Photon.
 5. **Anti-bot** — if Avalon (or others) block Obscura, add `--stealth` and consider a residential proxy.
