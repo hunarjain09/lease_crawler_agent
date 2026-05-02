@@ -2,6 +2,8 @@
 
 A conversational lease-evaluation agent: a user sends a property listing URL via iMessage (Terminal in dev), a Photon/spectrum-ts Node agent forwards it to a local Python FastAPI server, the server crawls the rendered page with Obscura (Rust headless browser) and asks Claude Opus 4.7 on GMI Cloud to extract lease "leaks" (rent, term, fees, parking, utilities, etc.), and a text summary is returned to the user on the same channel.
 
+![Demo](demo.gif)
+
 ## Quick start
 
 ```bash
