@@ -6,12 +6,23 @@
 
 ## 0. What you're building
 
+**Core flow (text summary):**
+```
+iMessage  →  Photon (spectrum-ts)  →  Local server (Python + Obscura)
+                  ▲                          │
+                  │                          └──►  GMI Cloud (Claude Opus)
+                  │                                       │
+                  └────────────  text summary  ◄──────────┘
+```
+
 A conversational agent that:
-1. Receives a property/listing URL from the user (locally via a TUI, eventually via iMessage).
+1. Receives a property/listing URL from the user (Terminal provider in dev, iMessage in prod).
 2. Crawls the rendered page (JS executed) using **Obscura**, a Rust headless browser.
-3. Sends crawled content to **GMI Cloud** (Anthropic-SDK-compatible) running **Claude Sonnet 4.6** to extract "leaks" — lease red flags (rent, lease term, fees, parking, utilities, etc.).
+3. Sends crawled content to **GMI Cloud** running **Claude Opus** (4.6 today, 4.7 if/when GMI exposes it) to extract "leaks" — lease red flags (rent, lease term, fees, parking, utilities, etc.) — and produce a summary.
 4. Maintains the running list of leaks in agent state.
-5. On request, generates a **video walkthrough** of the leaks via **Pexiverse** on GMI.
+5. Replies to the user with the summary on the same channel.
+
+**Follow-up (not blocking core):** generate a Pixverse video walkthrough of the apartments discussed. Detailed in the *Follow-up milestones* section near the bottom — implement only after the core text loop ships and is stable.
 
 User: a single person evaluating leases. No multi-tenant, no auth, no billing.
 
@@ -24,8 +35,8 @@ User: a single person evaluating leases. No multi-tenant, no auth, no billing.
 | Agent | **Node 20+** + `spectrum-ts` (TypeScript), deps via **pnpm**. Terminal provider for dev, iMessage in prod. |
 | Local server | **Python 3.12** + **FastAPI** + **Uvicorn**, deps via **uv** (`pyproject.toml`, `uv.lock`). |
 | Crawler | **Obscura** (`https://github.com/h4ckf0r0day/obscura`) — Rust, CDP, no Chrome dep. |
-| Reasoning LLM | **GMI Serverless** — OpenAI-compatible. Base `https://api.gmi-serving.com/v1`, bearer auth. Default model `deepseek-ai/DeepSeek-R1` (verify Claude availability before switching to `anthropic/claude-sonnet-4.6`). |
-| Video gen | **Pixverse via GMI Video API** (request-queue, async). Base `https://console.gmicloud.ai/api/v1/ie/requestqueue/apikey`. Model `Pixverse` (verify exact ID at runtime — GMI docs list other models like Veo3/Kling/Luma but acknowledge "...other models..."). Used to render a video summary of the apartments discussed in the session. |
+| Reasoning LLM | **GMI Serverless** — OpenAI-compatible. Base `https://api.gmi-serving.com/v1`, bearer auth. Default model `anthropic/claude-opus-4.6` (intent: Opus 4.7 once GMI exposes it; verify availability with `GET /v1/models`). |
+| Video gen *(follow-up)* | **Pixverse via GMI Video API** (request-queue, async). Base `https://console.gmicloud.ai/api/v1/ie/requestqueue/apikey`. Model `Pixverse`. Off the critical path. |
 | Tests | `pytest` (server, run via `uv run pytest`) + `vitest` (agent). |
 
 ---
@@ -76,7 +87,7 @@ Copy `.env.example` → `.env`. The server reads env via `pydantic-settings`.
 # GMI Serverless (OpenAI-compatible LLM)
 GMI_API_KEY=<your GMI key from console.gmicloud.ai>
 GMI_LLM_BASE_URL=https://api.gmi-serving.com/v1
-GMI_LLM_MODEL=deepseek-ai/DeepSeek-R1     # swap to anthropic/claude-sonnet-4.6 if available on serverless
+GMI_LLM_MODEL=anthropic/claude-opus-4.6   # upgrade to claude-opus-4-7 when GMI exposes it
 
 # GMI Video API (Pixverse — async request queue)
 GMI_VIDEO_BASE_URL=https://console.gmicloud.ai/api/v1/ie/requestqueue/apikey
@@ -262,14 +273,25 @@ Agent code:
 
 No code changes inside the message loop. Document the iMessage provider setup steps once Photon docs clarify the bridge requirements (Mac relay vs. hosted). Keep integration tests on Terminal.
 
-### M5 — Pixverse walkthrough video via GMI Video API
-**Goal:** `POST /walkthrough { leaks[] }` returns a real `video_url` summarizing the apartments discussed in the session.
+### M5 — Polish
+- Retries (`tenacity`) on GMI 5xx.
+- Structured logs (`structlog`).
+- sqlite persistence of leaks (`server/leaks.db`) so restarts don't lose state.
 
-The video is the artifact you'd share with a partner/roommate — narrated/visual recap of the listings reviewed so far. Pixverse is the chosen model (supports multi-shot generation with character consistency, which suits a per-listing walkthrough).
+---
 
-GMI Video API is **async with polling**:
-1. Build a prompt from the accumulated leaks: one shot per apartment, naming the property, rent, lease term, and 1–2 standout leaks. Use Pixverse's multi-shot prompt format.
-2. `POST {GMI_VIDEO_BASE_URL}/requests` with body:
+## 4a. Follow-up milestones (after core ships)
+
+Off the critical path. Implement only after the core text loop is stable and being used.
+
+### F1 — Pixverse walkthrough video
+**Goal:** `POST /walkthrough { leaks[] }` returns a `video_url` summarizing the apartments discussed.
+
+The artifact you'd share with a partner/roommate. Pixverse is the chosen model — multi-shot generation with character consistency suits a per-listing walkthrough. Available via GMI Video API (request-queue, async with polling).
+
+Steps:
+1. Build a prompt from accumulated leaks: one shot per apartment, naming property, rent, lease term, and 1–2 standout leaks.
+2. `POST {GMI_VIDEO_BASE_URL}/requests`:
    ```json
    {"model": "Pixverse", "payload": {"prompt": "<built prompt>", "durationSeconds": "8", "aspectRatio": "16:9"}}
    ```
@@ -278,23 +300,16 @@ GMI Video API is **async with polling**:
 4. Poll `GET {GMI_VIDEO_BASE_URL}/requests/{request_id}` every ~5s with exponential backoff, up to a 5-minute deadline.
 5. On `status == "success"`, return `outcome.video_url` (and `thumbnail_image_url`).
 
-**Verification step before coding:** hit `GET {GMI_VIDEO_BASE_URL}/models` (or the equivalent listing endpoint) with the API key and confirm the exact Pixverse model ID — GMI public docs don't enumerate it explicitly, but mention "...other models...". If the ID differs (e.g. `Pixverse-V6`), update env.
+Verify exact Pixverse model ID via `GET {GMI_VIDEO_BASE_URL}/models` before coding — GMI public docs don't enumerate it explicitly.
 
-**Tests:**
-- Unit: prompt builder from leaks; status-machine reducer (dispatched → processing → success/failed).
-- Integration: VCR cassette of a full submit + 3 polls + success response; assert `video_url` flows through.
+Tests: unit (prompt builder; status-machine reducer); integration (VCR cassette of submit + 3 polls + success).
 
-### M6 — Second GMI model
-Add once role is defined.
-
-### M7 — Polish
-- Retries (`tenacity`) on GMI 5xx.
-- Structured logs (`structlog`).
-- sqlite persistence of leaks (`server/leaks.db`) so restarts don't lose state.
+### F2 — Additional GMI model
+Add once a second model has a defined role.
 
 ---
 
-## 5. API contracts
+## 5. API contracts (core)
 
 ```
 GET  /health              → {"ok": true}
@@ -307,7 +322,10 @@ POST /crawl
 POST /analyze
   body: {"content": "<string>", "context": [Leak, ...]}
   200:  {"leaks": [Leak, ...], "summary": "<string>"}
+```
 
+Follow-up endpoints (added in F1):
+```
 POST /walkthrough
   body: {"leaks": [Leak, ...]}
   200:  {"video_url": "<https url>"}
@@ -369,9 +387,13 @@ The Spectrum agent runs on the user's machine inside a Node process. Tool calls 
 
 ---
 
-## 10. Definition of done (whole project)
+## 10. Definition of done
 
+**Core (M0–M5):**
 - `uv run pytest` in `server/` is green; coverage ≥ 80% on `crawler.py`, `inference.py`, route handlers.
 - `pnpm vitest run` in `agent/` is green.
-- `RUN_E2E=1 ./scripts/e2e.sh` against the Avalon URL produces a leak summary mentioning rent, lease term, and furnished premium, and (post-M5) a playable video URL.
+- `RUN_E2E=1 ./scripts/e2e.sh` against the Avalon URL produces a leak summary mentioning rent, lease term, and furnished premium delivered through the Spectrum agent.
 - README documents one-command setup: `make dev` boots Obscura sidecar, the FastAPI server, and the Spectrum Terminal agent.
+
+**Follow-up (F1):**
+- `POST /walkthrough` returns a playable Pixverse `video_url` for the canonical Avalon session.
