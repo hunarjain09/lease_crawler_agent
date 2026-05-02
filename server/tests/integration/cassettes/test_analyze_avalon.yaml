@@ -1,0 +1,144 @@
+interactions:
+- request:
+    body: '{"messages":[{"role":"system","content":"You are a lease analyst. The user
+      gives you the rendered content of an apartment / rental listing. Your job is
+      to surface every \"leak\" -- anything in the listing that affects (a) total
+      cost of occupancy, (b) lease flexibility, or (c) quality of life.\n\nExamples
+      of leaks: non-standard lease term (e.g. 14 months), furnished premium, parking
+      fees, utilities not included, mandatory amenity fees, deposit size, short notice
+      for availability, restrictive pet policies.\n\nReturn STRICT JSON in this exact
+      shape and nothing else:\n{\n  \"leaks\": [\n    {\n      \"id\": \"<short stable
+      id, may be empty -- server fills it>\",\n      \"source_url\": \"<echo of the
+      source url provided, or empty>\",\n      \"title\": \"<short label, e.g. ''Furnished
+      premium''>\",\n      \"severity\": \"low\" | \"med\" | \"high\",\n      \"detail\":
+      \"<one-sentence explanation citing concrete numbers>\",\n      \"evidence\":
+      \"<short verbatim quote from the listing, or null>\"\n    }\n  ],\n  \"summary\":
+      \"<2-3 sentence plain-English overview that names the base rent and lease term>\"\n}\n\nSeverity
+      rubric:\n- high: meaningfully changes total cost or makes the lease materially
+      worse (e.g. 14-month term, large furnished premium, parking >$200/mo).\n- med:
+      notable but not deal-breaking (utility caps, amenity fees).\n- low: informational
+      (move-in date, short availability window).\n\nAlways include at least the base
+      rent and the lease term as leaks if they appear in the content."},{"role":"user","content":"Source
+      URL: https://www.avaloncommunities.com/california/sunnyvale-apartments/avalon-silicon-valley/\n\nListing
+      content:\n<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\"
+      />\n  <title>Avalon Silicon Valley | 1 Bedroom Apartments in Sunnyvale</title>\n</head>\n<body>\n  <header>\n    <h1>Avalon
+      Silicon Valley</h1>\n    <p>Sunnyvale, CA &middot; 36 results</p>\n  </header>\n\n  <main>\n    <section
+      class=\"floorplan\">\n      <h2>1 Bedroom / 1 Bath / 720 sqft</h2>\n      <p>Available
+      to Tour &middot; Virtual tour</p>\n\n      <article class=\"unit\" data-unit=\"006-1117\">\n        <h3>Unit
+      006-1117</h3>\n        <p class=\"rent\">From <strong>$3,415</strong> on a <strong>14-month
+      lease</strong></p>\n        <p class=\"available\">Available May 03</p>\n      </article>\n\n      <article
+      class=\"unit\" data-unit=\"007-1149\">\n        <h3>Unit 007-1149</h3>\n        <p
+      class=\"rent\">From <strong>$3,415</strong> on a <strong>14-month lease</strong></p>\n        <p
+      class=\"available\">Available May 03</p>\n      </article>\n\n      <article
+      class=\"unit\" data-unit=\"003-3045\">\n        <h3>Unit 003-3045</h3>\n        <p
+      class=\"rent\">From <strong>$3,415</strong> on a <strong>14-month lease</strong></p>\n        <p
+      class=\"available\">Available May 03</p>\n      </article>\n\n      <aside class=\"furnished\">\n        <h4>Furnished
+      option</h4>\n        <p>Same floor plan, fully furnished, starting at <strong>$4,696</strong>
+      per month\n           (a premium of about <strong>$1,281/mo</strong> over the
+      unfurnished rate).</p>\n      </aside>\n    </section>\n  </main>\n</body>\n</html>\n"}],"model":"anthropic/claude-opus-4.7","max_tokens":4096,"response_format":{"type":"json_object"},"temperature":0.2}'
+    headers:
+      Accept:
+      - application/json
+      Accept-Encoding:
+      - gzip, deflate
+      Authorization:
+      - DUMMY
+      Connection:
+      - keep-alive
+      Content-Length:
+      - '3287'
+      Content-Type:
+      - application/json
+      Host:
+      - api.gmi-serving.com
+      User-Agent:
+      - AsyncOpenAI/Python 2.33.0
+      X-Stainless-Arch:
+      - arm64
+      X-Stainless-Async:
+      - async:asyncio
+      X-Stainless-Lang:
+      - python
+      X-Stainless-OS:
+      - MacOS
+      X-Stainless-Package-Version:
+      - 2.33.0
+      X-Stainless-Runtime:
+      - CPython
+      X-Stainless-Runtime-Version:
+      - 3.13.1
+      x-stainless-read-timeout:
+      - '600'
+      x-stainless-retry-count:
+      - '0'
+    method: POST
+    uri: https://api.gmi-serving.com/v1/chat/completions
+  response:
+    body:
+      string: '{"id":"msg_bdrk_ia75akip5z2mcwrtzmqchrljicpwvkm3ees3wcplrwkzjoehnwla","object":"chat.completion","created":1777751858,"model":"anthropic/claude-opus-4.7","choices":[{"index":0,"message":{"role":"assistant","content":"{\n  \"leaks\":
+        [\n    {\n      \"id\": \"\",\n      \"source_url\": \"https://www.avaloncommunities.com/california/sunnyvale-apartments/avalon-silicon-valley/\",\n      \"title\":
+        \"Base rent\",\n      \"severity\": \"high\",\n      \"detail\": \"Starting
+        rent for the 1BR/1BA 720 sqft floor plan is $3,415/month, translating to roughly
+        $47,810 over the advertised 14-month term.\",\n      \"evidence\": \"From
+        $3,415 on a 14-month lease\"\n    },\n    {\n      \"id\": \"\",\n      \"source_url\":
+        \"https://www.avaloncommunities.com/california/sunnyvale-apartments/avalon-silicon-valley/\",\n      \"title\":
+        \"Non-standard 14-month lease term\",\n      \"severity\": \"high\",\n      \"detail\":
+        \"All three listed units require a 14-month lease rather than a standard 12-month
+        term, locking you in for two extra months and misaligning renewal with typical
+        moving seasons.\",\n      \"evidence\": \"From $3,415 on a 14-month lease\"\n    },\n    {\n      \"id\":
+        \"\",\n      \"source_url\": \"https://www.avaloncommunities.com/california/sunnyvale-apartments/avalon-silicon-valley/\",\n      \"title\":
+        \"Furnished premium\",\n      \"severity\": \"high\",\n      \"detail\": \"Choosing
+        the furnished option costs $4,696/month, a premium of about $1,281/month (~37%)
+        over the unfurnished rate, adding roughly $17,934 across a 14-month lease.\",\n      \"evidence\":
+        \"starting at $4,696 per month (a premium of about $1,281/mo over the unfurnished
+        rate)\"\n    },\n    {\n      \"id\": \"\",\n      \"source_url\": \"https://www.avaloncommunities.com/california/sunnyvale-apartments/avalon-silicon-valley/\",\n      \"title\":
+        \"Utilities and fees not disclosed\",\n      \"severity\": \"med\",\n      \"detail\":
+        \"The listing advertises rent only and does not mention utilities, parking,
+        amenity fees, or deposits, so true total cost of occupancy is likely higher
+        than $3,415/month.\",\n      \"evidence\": null\n    },\n    {\n      \"id\":
+        \"\",\n      \"source_url\": \"https://www.avaloncommunities.com/california/sunnyvale-apartments/avalon-silicon-valley/\",\n      \"title\":
+        \"Future availability date\",\n      \"severity\": \"low\",\n      \"detail\":
+        \"All three units are not available until May 03, which may not align with
+        renters needing to move in sooner.\",\n      \"evidence\": \"Available May
+        03\"\n    }\n  ],\n  \"summary\": \"Avalon Silicon Valley''s 720 sqft 1BR/1BA
+        units start at $3,415/month but only on a non-standard 14-month lease, with
+        a May 3 move-in. A furnished version of the same floor plan carries a steep
+        ~$1,281/month premium ($4,696/mo), and the listing discloses no information
+        about utilities, parking, or deposits.\"\n}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1187,"completion_tokens":964,"total_tokens":2151}}'
+    headers:
+      Access-Control-Allow-Origin:
+      - '*'
+      Access-Control-Expose-Headers:
+      - x-gmi-request-id
+      CF-Cache-Status:
+      - DYNAMIC
+      CF-Ray:
+      - 9f59986b994f3708-SJC
+      Connection:
+      - keep-alive
+      Content-Type:
+      - application/json
+      Date:
+      - Sat, 02 May 2026 19:57:38 GMT
+      Server:
+      - cloudflare
+      Strict-Transport-Security:
+      - max-age=31536000; includeSubDomains
+      Transfer-Encoding:
+      - chunked
+      access-control-allow-credentials:
+      - 'true'
+      access-control-allow-headers:
+      - Content-Type, Authorization, X-Requested-With, x-gmi-request-id
+      access-control-allow-methods:
+      - GET, POST, PUT, DELETE, OPTIONS
+      access-control-max-age:
+      - '86400'
+      content-length:
+      - '2987'
+      x-gmi-request-id:
+      - c5f9f63b-33fd-4167-a92f-719efa818602
+    status:
+      code: 200
+      message: OK
+version: 1

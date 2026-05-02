@@ -13,7 +13,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 class Settings(BaseSettings):
     """Server settings.
 
-    M0 only exposes host/port. GMI / Obscura / Anthropic config is added in later milestones.
+    M0 only exposed host/port. M2 adds GMI Cloud LLM config.
     """
 
     SERVER_HOST: str = "127.0.0.1"
@@ -22,6 +22,13 @@ class Settings(BaseSettings):
     # Obscura crawler
     OBSCURA_BIN: str = "/usr/local/bin/obscura"
     OBSCURA_TIMEOUT_S: float = 30.0
+
+    # GMI Cloud serverless (OpenAI-compatible). API key is required at runtime
+    # but defaulted here so unit tests that import settings without env loaded
+    # don't blow up; the real value comes from `.env` or the process env.
+    GMI_API_KEY: str = ""
+    GMI_LLM_BASE_URL: str = "https://api.gmi-serving.com/v1"
+    GMI_LLM_MODEL: str = "anthropic/claude-opus-4.7"
 
     model_config = SettingsConfigDict(
         env_file=_REPO_ROOT / ".env",
