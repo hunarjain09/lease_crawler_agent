@@ -37,11 +37,23 @@ function getState(userId: string): SessionState {
 }
 
 for await (const [space, message] of app.messages) {
-  if (message.content.type !== "text") continue;
+  console.log(
+    `[agent] inbound platform=${message.platform} sender=${message.sender.id} type=${message.content.type}`,
+  );
+  let text: string;
+  if (message.content.type === "text") {
+    text = message.content.text;
+  } else if (message.content.type === "richlink") {
+    // iMessage delivers bare URLs as richlinks. Treat the url as the message text.
+    text = message.content.url;
+  } else {
+    continue;
+  }
   const userId = message.sender.id;
   const state = getState(userId);
-  const text = message.content.text;
+  console.log(`[agent] text: ${text.slice(0, 200)}`);
   const intent = classify(text);
+  console.log(`[agent] intent: ${intent.kind}`);
 
   await space.responding(async () => {
     try {

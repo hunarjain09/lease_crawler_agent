@@ -117,7 +117,6 @@ async def analyze(
             model=settings.GMI_LLM_MODEL,
             messages=messages,
             response_format={"type": "json_object"},
-            temperature=0.2,
             max_tokens=4096,
         )
         raw = completion.choices[0].message.content or ""
@@ -192,7 +191,6 @@ async def ask(
     completion = await client.chat.completions.create(
         model=settings.GMI_LLM_MODEL,
         messages=messages,
-        temperature=0.3,
         max_tokens=1024,
     )
     return (completion.choices[0].message.content or "").strip()
