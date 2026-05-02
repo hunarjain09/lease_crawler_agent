@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     # Obscura crawler
     OBSCURA_BIN: str = "/usr/local/bin/obscura"
     OBSCURA_TIMEOUT_S: float = 30.0
+    OBSCURA_RUN_TIMEOUT_S: float = 90.0  # subprocess deadline (auto-expand takes 15-30s)
+    # CRAWLER_BACKEND: "httpx" | "obscura" | "auto" (httpx first, fall back to
+    # obscura on 4xx/5xx/empty/<5KB body when OBSCURA_BIN exists).
+    CRAWLER_BACKEND: str = "auto"
+    OBSCURA_FALLBACK_MIN_BYTES: int = 5000
 
     # GMI Cloud serverless (OpenAI-compatible). API key is required at runtime
     # but defaulted here so unit tests that import settings without env loaded

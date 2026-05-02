@@ -16,12 +16,15 @@ export type SessionState = {
   summary: string;
   lastUrl: string | null;
   history: ChatTurn[];
+  /** Count of handled inbound messages this session. Caps at MAX_ROUNDS_PER_SESSION. */
+  roundCount: number;
 };
 
 export const HISTORY_LIMIT = 20;
+export const MAX_ROUNDS_PER_SESSION = 10;
 
 export function emptyState(): SessionState {
-  return { leaks: [], summary: "", lastUrl: null, history: [] };
+  return { leaks: [], summary: "", lastUrl: null, history: [], roundCount: 0 };
 }
 
 export function addLeaks(state: Leak[], incoming: Leak[]): Leak[] {

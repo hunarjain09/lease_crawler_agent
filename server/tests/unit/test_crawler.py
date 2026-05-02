@@ -7,8 +7,22 @@ import pytest
 
 from lease_crawler import crawler
 from lease_crawler.crawler import CrawlError
+from lease_crawler.settings import Settings
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _disable_obscura_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin CRAWLER_BACKEND=httpx so these tests exercise the httpx path only.
+
+    The default `auto` backend would otherwise fall back to Obscura on
+    httpx error/empty body, masking the failure modes we want to assert.
+    """
+    def _settings() -> Settings:
+        return Settings(CRAWLER_BACKEND="httpx", OBSCURA_BIN="")
+
+    monkeypatch.setattr(crawler, "get_settings", _settings)
 
 
 def _patch_client(monkeypatch: pytest.MonkeyPatch, handler) -> None:  # type: ignore[no-untyped-def]

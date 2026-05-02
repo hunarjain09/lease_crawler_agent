@@ -39,3 +39,10 @@ target/
 # Local data
 *.db
 *.sqlite
+
+# Local prebuilt tooling (Obscura binary etc.)
+.tools/
+
+# Coverage
+.coverage
+htmlcov/

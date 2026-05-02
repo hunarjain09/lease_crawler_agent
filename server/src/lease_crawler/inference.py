@@ -7,14 +7,20 @@ GMI's serverless `/chat/completions` is OpenAI-compatible, so we use the
 from __future__ import annotations
 
 import json
+import logging
+import time
 from functools import lru_cache
 from typing import Any
 
 from openai import AsyncOpenAI
 from pydantic import ValidationError
 
+from .extract import preprocess_for_analysis
+from .log_setup import log_event
 from .models import AnalyzeResponse, Leak, make_leak_id
 from .settings import get_settings
+
+logger = logging.getLogger("lease_crawler.inference")
 
 SYSTEM_PROMPT = """You are a lease analyst. The user gives you the rendered \
 content of an apartment / rental listing. Your job is to surface every \
@@ -56,10 +62,19 @@ def _client() -> AsyncOpenAI:
     return AsyncOpenAI(
         base_url=settings.GMI_LLM_BASE_URL,
         api_key=settings.GMI_API_KEY or "missing-key",
+        # GMI's per-minute quota is tight; the SDK respects Retry-After on 429.
+        max_retries=5,
+        timeout=60.0,
     )
 
 
 def _build_user_message(content: str, context: list[Leak], source_url: str | None) -> str:
+    """Compress the page content (units JSON or truncated HTML) before prompting.
+
+    Without this, a 700KB Avalon page eats ~190K input tokens and trips GMI's
+    per-minute quota; preprocess_for_analysis cuts this to <15K tokens.
+    """
+    payload, kind = preprocess_for_analysis(content)
     parts: list[str] = []
     if source_url:
         parts.append(f"Source URL: {source_url}")
@@ -69,7 +84,7 @@ def _build_user_message(content: str, context: list[Leak], source_url: str | Non
             "Existing leaks already known for this user (avoid duplicates "
             "but you may refine):\n" + ctx_dump
         )
-    parts.append("Listing content:\n" + content)
+    parts.append(f"Listing content (kind={kind}):\n" + payload)
     return "\n\n".join(parts)
 
 
@@ -105,6 +120,15 @@ async def analyze(
     settings = get_settings()
     context = list(context or [])
     user_message = _build_user_message(content, context, source_url)
+    log_event(
+        logger,
+        "analyze.start",
+        content_chars=len(content),
+        user_msg_chars=len(user_message),
+        context_leaks=len(context),
+        source_url=source_url or "-",
+        model=settings.GMI_LLM_MODEL,
+    )
     messages: list[dict[str, str]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_message},
@@ -113,18 +137,46 @@ async def analyze(
     client = _client()
     last_error: Exception | None = None
     for attempt in range(2):
+        log_event(logger, "analyze.gmi_call", attempt=attempt + 1, model=settings.GMI_LLM_MODEL)
+        call_start = time.perf_counter()
         completion = await client.chat.completions.create(
             model=settings.GMI_LLM_MODEL,
             messages=messages,
             response_format={"type": "json_object"},
             max_tokens=4096,
         )
+        call_ms = round((time.perf_counter() - call_start) * 1000, 1)
         raw = completion.choices[0].message.content or ""
+        usage = getattr(completion, "usage", None)
+        log_event(
+            logger,
+            "analyze.gmi_response",
+            attempt=attempt + 1,
+            duration_ms=call_ms,
+            output_chars=len(raw),
+            tokens_in=getattr(usage, "prompt_tokens", "-") if usage else "-",
+            tokens_out=getattr(usage, "completion_tokens", "-") if usage else "-",
+        )
         try:
             payload = json.loads(raw)
-            return _coerce_response(payload, source_url)
+            response = _coerce_response(payload, source_url)
+            log_event(
+                logger,
+                "analyze.done",
+                attempt=attempt + 1,
+                leaks=len(response.leaks),
+                summary_chars=len(response.summary),
+            )
+            return response
         except (json.JSONDecodeError, ValidationError, TypeError) as exc:
             last_error = exc
+            log_event(
+                logger,
+                "analyze.parse_error",
+                attempt=attempt + 1,
+                error=type(exc).__name__,
+                detail=str(exc)[:200],
+            )
             messages.append({"role": "assistant", "content": raw})
             messages.append(
                 {
@@ -138,6 +190,7 @@ async def analyze(
             )
             continue
 
+    log_event(logger, "analyze.failed", error=type(last_error).__name__ if last_error else "unknown")
     raise RuntimeError(f"GMI inference failed to return valid JSON after retry: {last_error}")
 
 
@@ -169,6 +222,16 @@ async def ask(
     leaks = list(leaks or [])
     history = list(history or [])
 
+    log_event(
+        logger,
+        "ask.start",
+        question_chars=len(question),
+        context_leaks=len(leaks),
+        history_turns=len(history),
+        summary_chars=len(summary or ""),
+        model=settings.GMI_LLM_MODEL,
+    )
+
     context_blob = json.dumps(
         {
             "summary": summary or "",
@@ -188,9 +251,21 @@ async def ask(
     ]
 
     client = _client()
+    call_start = time.perf_counter()
     completion = await client.chat.completions.create(
         model=settings.GMI_LLM_MODEL,
         messages=messages,
         max_tokens=1024,
     )
-    return (completion.choices[0].message.content or "").strip()
+    call_ms = round((time.perf_counter() - call_start) * 1000, 1)
+    answer = (completion.choices[0].message.content or "").strip()
+    usage = getattr(completion, "usage", None)
+    log_event(
+        logger,
+        "ask.done",
+        duration_ms=call_ms,
+        answer_chars=len(answer),
+        tokens_in=getattr(usage, "prompt_tokens", "-") if usage else "-",
+        tokens_out=getattr(usage, "completion_tokens", "-") if usage else "-",
+    )
+    return answer

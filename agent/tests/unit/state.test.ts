@@ -42,7 +42,12 @@ describe("addLeaks", () => {
 describe("emptyState", () => {
   it("returns a fresh blank session", () => {
     const s = emptyState();
-    expect(s).toEqual({ leaks: [], summary: "", lastUrl: null, history: [] });
+    expect(s).toEqual({ leaks: [], summary: "", lastUrl: null, history: [], roundCount: 0 });
+  });
+
+  it("resets roundCount to 0", () => {
+    const s = emptyState();
+    expect(s.roundCount).toBe(0);
   });
 });
 

@@ -3,7 +3,13 @@ import { terminal } from "spectrum-ts/providers/terminal";
 import { imessage } from "spectrum-ts/providers/imessage";
 
 import { classify } from "./classifier.js";
-import { addLeaks, appendTurn, emptyState, type SessionState } from "./state.js";
+import {
+  addLeaks,
+  appendTurn,
+  emptyState,
+  MAX_ROUNDS_PER_SESSION,
+  type SessionState,
+} from "./state.js";
 import { analyze, ask, crawl } from "./tools.js";
 
 const projectId = process.env.SPECTRUM_PROJECT_ID;
@@ -50,10 +56,18 @@ for await (const [space, message] of app.messages) {
     continue;
   }
   const userId = message.sender.id;
-  const state = getState(userId);
   console.log(`[agent] text: ${text.slice(0, 200)}`);
   const intent = classify(text);
   console.log(`[agent] intent: ${intent.kind}`);
+
+  // A new URL starts a fresh session for this user (different listing = different convo).
+  if (intent.kind === "url") {
+    if (stateByUser.has(userId)) {
+      console.log(`[agent] session.reset reason=new_url sender=${userId}`);
+    }
+    stateByUser.set(userId, emptyState());
+  }
+  const state = getState(userId);
 
   await space.responding(async () => {
     try {
@@ -65,7 +79,25 @@ for await (const [space, message] of app.messages) {
         state.leaks = addLeaks(state.leaks, result.leaks);
         state.summary = result.summary;
         state.lastUrl = intent.url;
-        reply = `${result.summary}\n\n(${result.leaks.length} new, ${state.leaks.length} total)`;
+
+        // Ask GMI to propose 3 follow-up questions a renter would care about.
+        // One extra /ask call; cheap and seeds the conversation.
+        const suggestQ =
+          "Based on the listing data, suggest exactly 3 short questions a renter would want answered next. Reply with ONLY the 3 questions, one per line, no numbering or bullets or preamble.";
+        const { answer: rawSuggestions } = await ask(
+          suggestQ,
+          result.leaks,
+          result.summary,
+          [],
+        );
+        const suggestions = rawSuggestions
+          .split("\n")
+          .map((l) => l.trim().replace(/^[-*•\d.)\s]+/, "").trim())
+          .filter((l) => l.length > 0)
+          .slice(0, 3);
+        const bullets = suggestions.map((s) => `• ${s}`).join("\n");
+
+        reply = `${result.summary}\n\nAsk me about:\n${bullets}\n\n(round 1/10)`;
       } else if (intent.kind === "walkthrough") {
         reply =
           state.leaks.length === 0
@@ -78,16 +110,33 @@ for await (const [space, message] of app.messages) {
           const { answer } = await ask(text, state.leaks, state.summary, state.history);
           state.history = appendTurn(state.history, { role: "user", content: text });
           state.history = appendTurn(state.history, { role: "assistant", content: answer });
-          reply = answer;
+          // Show the round counter so the user knows where they are in the 10-cap.
+          reply = `${answer}\n\n(round ${state.roundCount + 1}/10)`;
         }
       }
 
+      // Increment after a successful handle. We count BOTH URL messages and
+      // follow-up questions toward the cap (URL = round 1, then 9 more).
+      state.roundCount += 1;
+      console.log(
+        `[agent] reply -> ${userId} round=${state.roundCount}/${MAX_ROUNDS_PER_SESSION}: ${reply.replace(/\n/g, " ").slice(0, 200)}`,
+      );
       await message.reply(reply);
+      console.log(`[agent] reply.sent sender=${userId} chars=${reply.length} round=${state.roundCount}`);
+
+      // Silent reset: at the cap, drop this user's state so the next message
+      // starts a fresh session. No extra reply sent.
+      if (state.roundCount >= MAX_ROUNDS_PER_SESSION) {
+        stateByUser.delete(userId);
+        console.log(
+          `[agent] session.reset reason=cap_reached sender=${userId} cap=${MAX_ROUNDS_PER_SESSION}`,
+        );
+      }
     } catch (err) {
       console.error("[agent] error:", err);
-      await message.reply(
-        `Sorry, something broke. ${err instanceof Error ? err.message : String(err)}`,
-      );
+      const fallback = `Sorry, something broke. ${err instanceof Error ? err.message : String(err)}`;
+      console.log(`[agent] reply.error -> ${userId}: ${fallback.slice(0, 200)}`);
+      await message.reply(fallback);
     }
   });
 }

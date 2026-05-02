@@ -8,7 +8,8 @@
     "dev": "tsx --env-file=../.env src/index.ts",
     "typecheck": "tsc --noEmit",
     "test:watch": "vitest",
-    "dev:terminal": "tsx src/index.ts"
+    "dev:terminal": "tsx src/index.ts",
+    "mock": "tsx --env-file=../.env scripts/mock-photon.ts"
   },
   "keywords": [],
   "author": "",
