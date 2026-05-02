@@ -1,0 +1,142 @@
+"""GMI Cloud Claude Opus 4.7 inference for /analyze.
+
+GMI's serverless `/chat/completions` is OpenAI-compatible, so we use the
+`openai` SDK pointed at `GMI_LLM_BASE_URL` and authenticate with `GMI_API_KEY`.
+"""
+
+from __future__ import annotations
+
+import json
+from functools import lru_cache
+from typing import Any
+
+from openai import AsyncOpenAI
+from pydantic import ValidationError
+
+from .models import AnalyzeResponse, Leak, make_leak_id
+from .settings import get_settings
+
+SYSTEM_PROMPT = """You are a lease analyst. The user gives you the rendered \
+content of an apartment / rental listing. Your job is to surface every \
+"leak" -- anything in the listing that affects (a) total cost of occupancy, \
+(b) lease flexibility, or (c) quality of life.
+
+Examples of leaks: non-standard lease term (e.g. 14 months), furnished \
+premium, parking fees, utilities not included, mandatory amenity fees, \
+deposit size, short notice for availability, restrictive pet policies.
+
+Return STRICT JSON in this exact shape and nothing else:
+{
+  "leaks": [
+    {
+      "id": "<short stable id, may be empty -- server fills it>",
+      "source_url": "<echo of the source url provided, or empty>",
+      "title": "<short label, e.g. 'Furnished premium'>",
+      "severity": "low" | "med" | "high",
+      "detail": "<one-sentence explanation citing concrete numbers>",
+      "evidence": "<short verbatim quote from the listing, or null>"
+    }
+  ],
+  "summary": "<2-3 sentence plain-English overview that names the base rent and lease term>"
+}
+
+Severity rubric:
+- high: meaningfully changes total cost or makes the lease materially \
+worse (e.g. 14-month term, large furnished premium, parking >$200/mo).
+- med: notable but not deal-breaking (utility caps, amenity fees).
+- low: informational (move-in date, short availability window).
+
+Always include at least the base rent and the lease term as leaks if they \
+appear in the content."""
+
+
+@lru_cache(maxsize=1)
+def _client() -> AsyncOpenAI:
+    settings = get_settings()
+    return AsyncOpenAI(
+        base_url=settings.GMI_LLM_BASE_URL,
+        api_key=settings.GMI_API_KEY or "missing-key",
+    )
+
+
+def _build_user_message(content: str, context: list[Leak], source_url: str | None) -> str:
+    parts: list[str] = []
+    if source_url:
+        parts.append(f"Source URL: {source_url}")
+    if context:
+        ctx_dump = json.dumps([leak.model_dump() for leak in context], indent=2)
+        parts.append(
+            "Existing leaks already known for this user (avoid duplicates "
+            "but you may refine):\n" + ctx_dump
+        )
+    parts.append("Listing content:\n" + content)
+    return "\n\n".join(parts)
+
+
+def _coerce_response(payload: dict[str, Any], source_url: str | None) -> AnalyzeResponse:
+    """Validate model JSON, filling missing leak ids deterministically."""
+    raw_leaks = payload.get("leaks") or []
+    fixed: list[dict[str, Any]] = []
+    for raw in raw_leaks:
+        if not isinstance(raw, dict):
+            continue
+        leak = dict(raw)
+        leak.setdefault("source_url", source_url or "")
+        if not leak.get("source_url"):
+            leak["source_url"] = source_url or ""
+        title = str(leak.get("title", "")).strip()
+        if not leak.get("id") and title:
+            leak["id"] = make_leak_id(leak["source_url"], title)
+        fixed.append(leak)
+    summary = payload.get("summary") or ""
+    return AnalyzeResponse.model_validate({"leaks": fixed, "summary": summary})
+
+
+async def analyze(
+    content: str,
+    context: list[Leak] | None = None,
+    source_url: str | None = None,
+) -> AnalyzeResponse:
+    """Call GMI Cloud and return the parsed AnalyzeResponse.
+
+    On JSON parse / schema failure, retries exactly once with the parser
+    error appended to the user message. A second failure raises.
+    """
+    settings = get_settings()
+    context = list(context or [])
+    user_message = _build_user_message(content, context, source_url)
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_message},
+    ]
+
+    client = _client()
+    last_error: Exception | None = None
+    for attempt in range(2):
+        completion = await client.chat.completions.create(
+            model=settings.GMI_LLM_MODEL,
+            messages=messages,
+            response_format={"type": "json_object"},
+            temperature=0.2,
+            max_tokens=4096,
+        )
+        raw = completion.choices[0].message.content or ""
+        try:
+            payload = json.loads(raw)
+            return _coerce_response(payload, source_url)
+        except (json.JSONDecodeError, ValidationError, TypeError) as exc:
+            last_error = exc
+            messages.append({"role": "assistant", "content": raw})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Your previous response failed to parse with: "
+                        f"{type(exc).__name__}: {exc}. Re-emit ONLY valid "
+                        "JSON matching the schema; no prose, no code fence."
+                    ),
+                }
+            )
+            continue
+
+    raise RuntimeError(f"GMI inference failed to return valid JSON after retry: {last_error}")
