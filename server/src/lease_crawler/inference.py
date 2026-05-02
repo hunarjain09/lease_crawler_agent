@@ -140,3 +140,59 @@ async def analyze(
             continue
 
     raise RuntimeError(f"GMI inference failed to return valid JSON after retry: {last_error}")
+
+
+ASK_SYSTEM_PROMPT = """You are a friendly assistant helping the user evaluate \
+apartment listings they've shared. The user has discussed one or more rental \
+properties; you have the structured leak findings (cost / flexibility / \
+quality-of-life issues) and a short summary for each. You also have the \
+running chat history.
+
+Answer the user's latest question concisely and concretely. Cite specific \
+numbers (rent, lease term, fees, square footage) whenever they appear in the \
+known data. If the user asks something the data doesn't cover, say so plainly \
+rather than inventing detail. Keep replies tight: 1-3 short sentences for \
+factual asks, a short bulleted list when comparing units."""
+
+
+async def ask(
+    question: str,
+    leaks: list[Leak] | None = None,
+    summary: str | None = None,
+    history: list[dict[str, str]] | None = None,
+) -> str:
+    """Single-shot Q&A grounded in the user's known leaks + summary.
+
+    `history` is the running chat in `[{"role": "user"|"assistant", "content": "..."}]`
+    form (most recent last). The latest user `question` is appended on top.
+    """
+    settings = get_settings()
+    leaks = list(leaks or [])
+    history = list(history or [])
+
+    context_blob = json.dumps(
+        {
+            "summary": summary or "",
+            "leaks": [leak.model_dump() for leak in leaks],
+        },
+        indent=2,
+    )
+
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": ASK_SYSTEM_PROMPT},
+        {
+            "role": "system",
+            "content": "Known apartment data (JSON):\n" + context_blob,
+        },
+        *history,
+        {"role": "user", "content": question},
+    ]
+
+    client = _client()
+    completion = await client.chat.completions.create(
+        model=settings.GMI_LLM_MODEL,
+        messages=messages,
+        temperature=0.3,
+        max_tokens=1024,
+    )
+    return (completion.choices[0].message.content or "").strip()
