@@ -18,7 +18,7 @@ iMessage  →  Photon (spectrum-ts)  →  Local server (Python + Obscura)
 A conversational agent that:
 1. Receives a property/listing URL from the user (Terminal provider in dev, iMessage in prod).
 2. Crawls the rendered page (JS executed) using **Obscura**, a Rust headless browser.
-3. Sends crawled content to **GMI Cloud** running **Claude Opus** (4.6 today, 4.7 if/when GMI exposes it) to extract "leaks" — lease red flags (rent, lease term, fees, parking, utilities, etc.) — and produce a summary.
+3. Sends crawled content to **GMI Cloud** running **Claude Opus 4.7** (`anthropic/claude-opus-4.7`, confirmed in account catalog) to extract "leaks" — lease red flags (rent, lease term, fees, parking, utilities, etc.) — and produce a summary.
 4. Maintains the running list of leaks in agent state.
 5. Replies to the user with the summary on the same channel.
 
@@ -35,8 +35,8 @@ User: a single person evaluating leases. No multi-tenant, no auth, no billing.
 | Agent | **Node 20+** + `spectrum-ts` (TypeScript), deps via **pnpm**. Terminal provider for dev, iMessage in prod. |
 | Local server | **Python 3.12** + **FastAPI** + **Uvicorn**, deps via **uv** (`pyproject.toml`, `uv.lock`). |
 | Crawler | **Obscura** (`https://github.com/h4ckf0r0day/obscura`) — Rust, CDP, no Chrome dep. |
-| Reasoning LLM | **GMI Serverless** — OpenAI-compatible. Base `https://api.gmi-serving.com/v1`, bearer auth. Default model `anthropic/claude-opus-4.6` (intent: Opus 4.7 once GMI exposes it; verify availability with `GET /v1/models`). |
-| Video gen *(follow-up)* | **Pixverse via GMI Video API** (request-queue, async). Base `https://console.gmicloud.ai/api/v1/ie/requestqueue/apikey`. Model `Pixverse`. Off the critical path. |
+| Reasoning LLM | **GMI Serverless** — OpenAI-compatible. Base `https://api.gmi-serving.com/v1`, bearer auth. Model `anthropic/claude-opus-4.7` (verified present in account catalog). Pricing tier 0: $4.50 / $22.50 per 1M tokens (prompt / completion); 409,600-token context. |
+| Video gen *(follow-up)* | **Pixverse via GMI Video API** (request-queue, async). Base `https://console.gmicloud.ai/api/v1/ie/requestqueue/apikey`. Model `pixverse-v5.6-t2v` (text-to-video). Alternatives in catalog: `pixverse-v5.6-i2v` (image-to-video), `pixverse-v5.6-transition`. Off the critical path. |
 | Tests | `pytest` (server, run via `uv run pytest`) + `vitest` (agent). |
 
 ---
@@ -379,10 +379,10 @@ The Spectrum agent runs on the user's machine inside a Node process. Tool calls 
 
 ## 9. Open TBDs (don't block on these)
 
-1. **Claude on GMI serverless** — confirm whether `anthropic/claude-sonnet-4.6` (or 4.7) is callable via `/v1/chat/completions` or only via the Claude-Code Anthropic-compat adapter. Check `GET /v1/models`.
-2. **Pixverse exact model ID on GMI** — confirm via `GET {GMI_VIDEO_BASE_URL}/models` whether the string is `Pixverse`, `Pixverse-V6`, or similar. Public docs only enumerate Veo3/Kling/Luma but acknowledge other models exist.
-3. **Second GMI model** — name + role still undefined.
-4. **iMessage provider deployment** — Mac relay (BlueBubbles-style) vs. hosted by Photon.
+1. ~~Claude on GMI serverless~~ — **resolved**: `anthropic/claude-opus-4.7` confirmed callable via `/v1/chat/completions`.
+2. ~~Pixverse exact model ID~~ — **resolved**: `pixverse-v5.6-t2v` (plus `-i2v`, `-transition` variants).
+3. **Second GMI model** — still undefined; not blocking.
+4. **iMessage provider deployment** — Mac relay (BlueBubbles-style) vs. hosted by Photon. Resolved at M4.
 5. **Anti-bot** — if Avalon (or others) block Obscura, add `--stealth` and consider a residential proxy.
 
 ---
