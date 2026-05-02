@@ -1,0 +1,41 @@
+# Secrets — NEVER commit
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# uv
+.uv/
+
+# Node / pnpm
+node_modules/
+.pnpm-store/
+dist/
+*.tsbuildinfo
+
+# Vitest
+coverage/
+
+# Obscura build artifacts
+target/
+
+# OS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+
+# Local data
+*.db
+*.sqlite
