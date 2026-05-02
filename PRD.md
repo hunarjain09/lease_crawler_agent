@@ -127,7 +127,15 @@ type Leak = { id: string; source_url: string; title: string; severity: "low"|"me
 ## 11. Verification Plan
 - Unit: each local server endpoint with mocked GMI + crawler.
 - Integration: `curl` against the running local server reproduces both flows.
-- E2E: iMessage in → video link out, with at least one real listing URL.
+- E2E: iMessage in → video link out, using the canonical test URL below.
+
+### 11.1 Canonical test URL
+`https://www.avaloncommunities.com/california/sunnyvale-apartments/avalon-silicon-valley/`
+
+Smoke-test sequence at each milestone:
+- **M1:** `obscura fetch <url> --dump html` returns rendered listing (JS-driven content present, not just shell HTML).
+- **M2:** `POST /analyze` over the crawled content returns a non-empty `leaks[]` (e.g. fees, lease length, utilities, parking).
+- **M3+:** Send the URL via Terminal/iMessage → agent replies with a leak summary.
 
 ---
 
