@@ -5,9 +5,10 @@
   "main": "index.js",
   "scripts": {
     "test": "vitest run",
-    "dev": "tsx src/index.ts",
+    "dev": "tsx --env-file=../.env src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "dev:terminal": "tsx src/index.ts"
   },
   "keywords": [],
   "author": "",
